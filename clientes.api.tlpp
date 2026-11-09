@@ -1,0 +1,235 @@
+#include "tlpp-core.th"
+#include "tlpp-rest.th"
+
+//-------------------------------------------------------------------
+// tlpp-rest-api-template
+// Template de API REST em TLPP para TOTVS Protheus.
+//
+// Referências oficiais (TDN - TOTVS):
+//   REST tlppCore / objeto oRest .. https://tdn.totvs.com/display/tec/Query+String
+//   oRest:getHeaderRequest ........ https://tdn.totvs.com/display/tec/oRest:getHeaderRequest
+//   oRest:setStatusCode ........... https://tdn.totvs.com/display/tec/HTTP+Status+Code
+//   oRest:setKeyHeaderResponse .... https://tdn.totvs.com/display/tec/oRest:setKeyHeaderResponse
+//   FWExecStatement ............... https://tdn.totvs.com/display/public/framework/FWExecStatement
+//   Operadores "=" e "==" ......... https://tdn.totvs.com/display/tec/Operadores+Comuns
+//-------------------------------------------------------------------
+
+namespace exemplo.api.clientes
+
+//-------------------------------------------------------------------
+/*/{Protheus.doc} listarClientes
+GET /api/v1/clientes
+Lista clientes (SA1) com paginação e filtro opcional por nome.
+
+Query params:
+    page     - página (padrão 1)
+    pageSize - itens por página (padrão 10, máximo 100)
+    nome     - trecho do nome do cliente (opcional)
+
+@author Thauan Miranda
+/*/
+//-------------------------------------------------------------------
+@Get("/api/v1/clientes")
+user function listarClientes()
+    local jQuery
+    local jResp
+    local jItem
+    local aItems    as array
+    local oExec     as object
+    local cQuery    as character
+    local cAlias    as character
+    local cNome     as character
+    local nPage     as numeric
+    local nPageSize as numeric
+    local nCount    as numeric
+
+    if !tokenValido()
+        return .T.
+    endif
+
+    jQuery    := oRest:getQueryRequest()
+    nPage     := paramNumerico(jQuery, "page", 1)
+    nPageSize := Min(paramNumerico(jQuery, "pageSize", 10), 100)
+    cNome     := paramTexto(jQuery, "nome")
+
+    cQuery := "SELECT A1_COD, A1_LOJA, A1_NOME, A1_MUN, A1_EST "
+    cQuery += "  FROM " + RetSqlName("SA1")
+    cQuery += " WHERE A1_FILIAL = ? "
+    cQuery += "   AND D_E_L_E_T_ = ' ' "
+    if !Empty(cNome)
+        cQuery += "   AND A1_NOME LIKE ? "
+    endif
+    cQuery += " ORDER BY A1_COD, A1_LOJA "
+    cQuery := ChangeQuery(cQuery)
+
+    // FWExecStatement: os valores vão por parâmetro (?) e o bind é feito
+    // direto no banco. Nada de concatenar dado da requisição na query.
+    oExec := FWExecStatement():New(cQuery)
+    oExec:SetString(1, xFilial("SA1"))
+    if !Empty(cNome)
+        oExec:SetString(2, "%" + Upper(cNome) + "%")
+    endif
+
+    cAlias := oExec:OpenAlias()
+
+    // Pula os registros das páginas anteriores
+    (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+
+    aItems := {}
+    nCount := 0
+    while !(cAlias)->(Eof()) .and. nCount < nPageSize
+        jItem := JsonObject():New()
+        jItem["codigo"]    := AllTrim((cAlias)->A1_COD)
+        jItem["loja"]      := AllTrim((cAlias)->A1_LOJA)
+        jItem["nome"]      := AllTrim((cAlias)->A1_NOME)
+        jItem["municipio"] := AllTrim((cAlias)->A1_MUN)
+        jItem["estado"]    := AllTrim((cAlias)->A1_EST)
+        aAdd(aItems, jItem)
+
+        nCount++
+        (cAlias)->(DbSkip())
+    enddo
+
+    jResp := JsonObject():New()
+    jResp["items"]   := aItems
+    jResp["hasNext"] := !(cAlias)->(Eof())
+
+    (cAlias)->(DbCloseArea())
+    oExec:Destroy()
+    oExec := nil
+
+    responder(200, jResp)
+return .T.
+
+//-------------------------------------------------------------------
+/*/{Protheus.doc} buscarCliente
+GET /api/v1/clientes/:codigo/:loja
+Retorna um cliente específico.
+
+@author Thauan Miranda
+/*/
+//-------------------------------------------------------------------
+@Get("/api/v1/clientes/:codigo/:loja")
+user function buscarCliente()
+    local jPath
+    local jResp
+    local cCodigo as character
+    local cLoja   as character
+
+    if !tokenValido()
+        return .T.
+    endif
+
+    jPath   := oRest:getPathParamsRequest()
+    cCodigo := PadR(jPath["codigo"], TamSX3("A1_COD")[1])
+    cLoja   := PadR(jPath["loja"], TamSX3("A1_LOJA")[1])
+
+    DbSelectArea("SA1")
+    SA1->(DbSetOrder(1)) // A1_FILIAL + A1_COD + A1_LOJA
+
+    if !SA1->(DbSeek(xFilial("SA1") + cCodigo + cLoja))
+        responderErro(404, "Cliente não encontrado.")
+        return .T.
+    endif
+
+    jResp := JsonObject():New()
+    jResp["codigo"]    := AllTrim(SA1->A1_COD)
+    jResp["loja"]      := AllTrim(SA1->A1_LOJA)
+    jResp["nome"]      := AllTrim(SA1->A1_NOME)
+    jResp["municipio"] := AllTrim(SA1->A1_MUN)
+    jResp["estado"]    := AllTrim(SA1->A1_EST)
+
+    responder(200, jResp)
+return .T.
+
+//-------------------------------------------------------------------
+// Valida o header "Authorization: Bearer <token>"
+// O token esperado fica no parâmetro MV_XAPITOK (SX6).
+//-------------------------------------------------------------------
+static function tokenValido() as logical
+    local jHeader
+    local xValor
+    local cRecebido as character
+    local cEsperado as character
+
+    cRecebido := ""
+    jHeader   := oRest:getHeaderRequest()
+
+    if ValType(jHeader) == "J"
+        xValor := jHeader:GetJsonObject("Authorization")
+        if ValType(xValor) <> "C"
+            xValor := jHeader:GetJsonObject("authorization")
+        endif
+        if ValType(xValor) == "C"
+            cRecebido := xValor
+        endif
+    endif
+
+    cEsperado := AllTrim(SuperGetMV("MV_XAPITOK", .F., ""))
+
+    // Use "==" (exatamente igual).
+    // Conforme a TDN (Operadores Comuns), com "=" duas strings de tamanhos
+    // diferentes podem ser consideradas iguais: "ABCD" = "ABC" é verdadeiro.
+    if Empty(cEsperado) .or. !(cRecebido == "Bearer " + cEsperado)
+        responderErro(401, "Token inválido ou ausente.")
+        return .F.
+    endif
+return .T.
+
+//-------------------------------------------------------------------
+// Lê um query param numérico, com valor padrão
+//-------------------------------------------------------------------
+static function paramNumerico(jParams, cChave as character, nPadrao as numeric) as numeric
+    local xValor
+    local nValor as numeric
+
+    nValor := nPadrao
+    if ValType(jParams) == "J"
+        xValor := jParams:GetJsonObject(cChave)
+        if ValType(xValor) == "C"
+            nValor := Int(Val(xValor))
+        endif
+    endif
+
+    if nValor <= 0
+        nValor := nPadrao
+    endif
+return nValor
+
+//-------------------------------------------------------------------
+// Lê um query param texto (vazio se não informado)
+//-------------------------------------------------------------------
+static function paramTexto(jParams, cChave as character) as character
+    local xValor
+    local cValor as character
+
+    cValor := ""
+    if ValType(jParams) == "J"
+        xValor := jParams:GetJsonObject(cChave)
+        if ValType(xValor) == "C"
+            cValor := AllTrim(xValor)
+        endif
+    endif
+return cValor
+
+//-------------------------------------------------------------------
+// Envia uma resposta JSON
+//-------------------------------------------------------------------
+static function responder(nStatus as numeric, jBody)
+    oRest:setKeyHeaderResponse("Content-Type", "application/json; charset=utf-8")
+    oRest:setStatusCode(nStatus)
+    oRest:setResponse(EncodeUTF8(jBody:toJson()))
+return
+
+//-------------------------------------------------------------------
+// Envia um erro no formato { "code": 404, "message": "..." }
+//-------------------------------------------------------------------
+static function responderErro(nStatus as numeric, cMensagem as character)
+    local jErro
+
+    jErro := JsonObject():New()
+    jErro["code"]    := nStatus
+    jErro["message"] := cMensagem
+
+    responder(nStatus, jErro)
+return
