@@ -14,8 +14,6 @@
 //   Operadores "=" e "==" ......... https://tdn.totvs.com/display/tec/Operadores+Comuns
 //-------------------------------------------------------------------
 
-namespace exemplo.api.clientes
-
 //-------------------------------------------------------------------
 /*/{Protheus.doc} listarClientes
 GET /api/v1/clientes
@@ -72,8 +70,12 @@ user function listarClientes()
 
     cAlias := oExec:OpenAlias()
 
-    // Pula os registros das páginas anteriores
-    (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+    // Pula os registros das páginas anteriores.
+    // Só chama o DbSkip quando há o que pular: na página 1, DbSkip(0)
+    // fazia o primeiro registro ser lido com os campos vazios.
+    if nPage > 1
+        (cAlias)->(DbSkip((nPage - 1) * nPageSize))
+    endif
 
     aItems := {}
     nCount := 0
@@ -103,13 +105,16 @@ return .T.
 
 //-------------------------------------------------------------------
 /*/{Protheus.doc} buscarCliente
-GET /api/v1/clientes/:codigo/:loja
+GET /api/v1/clientes/:codigo
 Retorna um cliente específico.
+
+Query params:
+    loja - loja do cliente (opcional; sem ela, retorna a primeira loja do código)
 
 @author Thauan Miranda
 /*/
 //-------------------------------------------------------------------
-@Get("/api/v1/clientes/:codigo/:loja")
+@Get("/api/v1/clientes/:codigo")
 user function buscarCliente()
     local jPath
     local jResp
@@ -122,13 +127,16 @@ user function buscarCliente()
 
     jPath   := oRest:getPathParamsRequest()
     cCodigo := PadR(jPath["codigo"], TamSX3("A1_COD")[1])
-    cLoja   := PadR(jPath["loja"], TamSX3("A1_LOJA")[1])
+    cLoja   := paramTexto(oRest:getQueryRequest(), "loja")
+    if !Empty(cLoja)
+        cLoja := PadR(cLoja, TamSX3("A1_LOJA")[1])
+    endif
 
     DbSelectArea("SA1")
     SA1->(DbSetOrder(1)) // A1_FILIAL + A1_COD + A1_LOJA
 
     if !SA1->(DbSeek(xFilial("SA1") + cCodigo + cLoja))
-        responderErro(404, "Cliente não encontrado.")
+        responderErro(404, "Cliente nao encontrado.")
         return .T.
     endif
 
@@ -143,8 +151,12 @@ user function buscarCliente()
 return .T.
 
 //-------------------------------------------------------------------
-// Valida o header "Authorization: Bearer <token>"
+// Valida o header "X-Api-Token: <token>"
 // O token esperado fica no parâmetro MV_XAPITOK (SX6).
+//
+// Usamos um header próprio (e não "Authorization") porque, com
+// security=1 no appserver.ini, o servidor REST usa o "Authorization"
+// para o usuário/senha do Protheus.
 //-------------------------------------------------------------------
 static function tokenValido() as logical
     local jHeader
@@ -156,12 +168,12 @@ static function tokenValido() as logical
     jHeader   := oRest:getHeaderRequest()
 
     if ValType(jHeader) == "J"
-        xValor := jHeader:GetJsonObject("Authorization")
+        xValor := jHeader:GetJsonObject("X-Api-Token")
         if ValType(xValor) <> "C"
-            xValor := jHeader:GetJsonObject("authorization")
+            xValor := jHeader:GetJsonObject("x-api-token")
         endif
         if ValType(xValor) == "C"
-            cRecebido := xValor
+            cRecebido := AllTrim(xValor)
         endif
     endif
 
@@ -170,8 +182,8 @@ static function tokenValido() as logical
     // Use "==" (exatamente igual).
     // Conforme a TDN (Operadores Comuns), com "=" duas strings de tamanhos
     // diferentes podem ser consideradas iguais: "ABCD" = "ABC" é verdadeiro.
-    if Empty(cEsperado) .or. !(cRecebido == "Bearer " + cEsperado)
-        responderErro(401, "Token inválido ou ausente.")
+    if Empty(cEsperado) .or. !(cRecebido == cEsperado)
+        responderErro(401, "Token invalido ou ausente.")
         return .F.
     endif
 return .T.
@@ -214,6 +226,9 @@ return cValor
 
 //-------------------------------------------------------------------
 // Envia uma resposta JSON
+// EncodeUTF8 converte de CP1252 (padrão do Protheus/banco) para UTF-8.
+// Por isso as mensagens fixas deste fonte não usam acentos: o arquivo
+// está salvo em UTF-8 e o acento seria convertido duas vezes.
 //-------------------------------------------------------------------
 static function responder(nStatus as numeric, jBody)
     oRest:setKeyHeaderResponse("Content-Type", "application/json; charset=utf-8")
